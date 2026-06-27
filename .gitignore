@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+.env
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+coverage/
+
+# Logs
+*.log
+
+# Local credentials
+service_account.json
+*.pem
+*.key
+
+# OS files
+.DS_Store
+Thumbs.db
