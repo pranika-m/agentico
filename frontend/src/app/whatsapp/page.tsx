@@ -28,6 +28,15 @@ function classify(message: string) {
   return "Monitor";
 }
 
+// Filters out the internal/support-side participant(s) in the export so only
+// actual customers show up as ticket candidates. Matches common labels used
+// for the support side of a WhatsApp thread.
+const INTERNAL_SENDER_PATTERN = /support team|customer care|care team|^support$|^agent$|^team$/i;
+
+function isInternalSender(name: string) {
+  return INTERNAL_SENDER_PATTERN.test(name.trim());
+}
+
 export default function WhatsAppIngest() {
   const [results, setResults] = useState<Record<string, ContactSummary> | null>(null);
   const [fileName, setFileName] = useState("");
@@ -56,15 +65,17 @@ export default function WhatsAppIngest() {
     }
   };
 
-  const rows = useMemo(() => Object.entries(results ?? {}).sort(([, a], [, b]) => b.message_count - a.message_count), [results]);
+  const rows = useMemo(
+    () =>
+      Object.entries(results ?? {})
+        .filter(([name]) => !isInternalSender(name))
+        .sort(([, a], [, b]) => b.message_count - a.message_count),
+    [results]
+  );
   const actionable = rows.filter(([, info]) => classify(info.last_message) === "Create ticket").length;
 
   const addToQueue = async (name: string, info: ContactSummary) => {
     const email = (emailDrafts[name] || "").trim();
-    if (!email) {
-      setQueueState((prev) => ({ ...prev, [name]: "error" }));
-      return;
-    }
 
     setQueueState((prev) => ({ ...prev, [name]: "adding" }));
     try {
@@ -73,7 +84,7 @@ export default function WhatsAppIngest() {
       const conversation = info.messages.map((m) => `[${m.time}] ${m.message}`).join("\n");
       const response = await apiPost<SubmitResponse>("/tickets/submit", {
         name,
-        email,
+        email, // optional for WhatsApp-sourced contacts; may be ""
         query: conversation,
         subject: `WhatsApp: ${name}`,
       });
@@ -174,12 +185,12 @@ export default function WhatsAppIngest() {
                                 <input
                                   className="form-input form-input-sm"
                                   type="email"
-                                  placeholder="customer email"
+                                  placeholder="customer email (optional)"
                                   value={emailDrafts[name] || ""}
                                   onChange={(event) =>
                                     setEmailDrafts((prev) => ({ ...prev, [name]: event.target.value }))
                                   }
-                                  style={{ width: "150px" }}
+                                  style={{ width: "170px" }}
                                 />
                                 <button
                                   type="button"
@@ -193,7 +204,7 @@ export default function WhatsAppIngest() {
                             )}
                             {state === "error" && (
                               <p className="text-muted" style={{ color: "#c0392b", marginTop: "4px" }}>
-                                Enter an email first.
+                                Could not add. Try again.
                               </p>
                             )}
                           </td>
