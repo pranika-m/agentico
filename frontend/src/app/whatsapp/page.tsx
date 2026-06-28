@@ -80,8 +80,9 @@ export default function WhatsAppIngest() {
     setQueueState((prev) => ({ ...prev, [name]: "adding" }));
     try {
       // Use this contact's own messages as the ticket body, so the agent
-      // gets the full conversation context, not just the last line.
-      const conversation = info.messages.map((m) => `[${m.time}] ${m.message}`).join("\n");
+      // gets full conversation context. Just the message text, no
+      // timestamps, joined with line breaks.
+      const conversation = info.messages.map((m) => m.message).join("\n");
       const response = await apiPost<SubmitResponse>("/tickets/submit", {
         name,
         email, // optional for WhatsApp-sourced contacts; may be ""
