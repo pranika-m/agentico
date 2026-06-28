@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -56,7 +57,19 @@ def _load_service_account_info():
     )
 
 
-def get_sheet():
+_sheet_cache = None  # cached gspread worksheet handle, reused across calls
+
+
+def get_sheet(force_refresh: bool = False):
+    """Return a cached worksheet handle. Re-authenticating and re-opening the
+    spreadsheet on every single call (as before) multiplies API usage and was
+    a major contributor to hitting Google Sheets' per-minute quota during
+    batch runs. We now open it once and reuse it; pass force_refresh=True to
+    force a fresh handle (e.g. after an auth-related failure)."""
+    global _sheet_cache
+    if _sheet_cache is not None and not force_refresh:
+        return _sheet_cache
+
     service_account_info = _load_service_account_info()
     creds = Credentials.from_service_account_info(
         service_account_info,
@@ -69,7 +82,8 @@ def get_sheet():
     spreadsheet_id = _get_spreadsheet_id()
     if not spreadsheet_id:
         raise RuntimeError("SHEET_ID is not configured.")
-    return client.open_by_key(spreadsheet_id).sheet1
+    _sheet_cache = client.open_by_key(spreadsheet_id).sheet1
+    return _sheet_cache
 
 
 def _ensure_headers(sheet):
@@ -99,6 +113,13 @@ def _find_ticket_row(records, ticket_id):
     return None
 
 
+# Serializes writes to the Sheets API across concurrently-running tickets.
+# Sending ~20 simultaneous requests at once (one per ticket via
+# asyncio.to_thread) was blowing through Google Sheets' per-user/per-100s
+# quota; capping concurrency here keeps us under it.
+_sheet_write_semaphore = threading.Semaphore(3)
+
+
 def log_ticket_to_sheet(
     ticket_id,
     customer,
@@ -106,7 +127,7 @@ def log_ticket_to_sheet(
     confidence,
     query="",
     reply="",
-    max_retries=3,
+    max_retries=5,
 ):
     values = {
         "ticket_id": ticket_id,
@@ -118,22 +139,42 @@ def log_ticket_to_sheet(
         "updated_at": datetime.utcnow().isoformat(),
     }
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            sheet = get_sheet()
-            _ensure_headers(sheet)
-            headers = sheet.row_values(1)
-            row = _row_from_headers(headers, values)
-            existing_row = _find_ticket_row(sheet.get_all_records(), ticket_id)
+    last_error = None
+    with _sheet_write_semaphore:
+        for attempt in range(1, max_retries + 1):
+            try:
+                sheet = get_sheet(force_refresh=(attempt > 1 and last_error is not None and _looks_like_auth_error(last_error)))
+                _ensure_headers(sheet)
+                headers = sheet.row_values(1)
+                row = _row_from_headers(headers, values)
+                existing_row = _find_ticket_row(sheet.get_all_records(), ticket_id)
 
-            if existing_row:
-                end_col = gspread.utils.rowcol_to_a1(existing_row, len(headers))
-                sheet.update(f"A{existing_row}:{end_col}", [row])
-            else:
-                sheet.append_row(row)
-            return
-        except Exception as e:
-            if attempt == max_retries:
-                print(f"[sheets_sync] Failed to upsert {ticket_id} after {max_retries} attempts: {e}")
-            else:
-                time.sleep(1.5 * attempt)
+                if existing_row:
+                    end_col = gspread.utils.rowcol_to_a1(existing_row, len(headers))
+                    sheet.update(f"A{existing_row}:{end_col}", [row])
+                else:
+                    sheet.append_row(row)
+                return
+            except Exception as e:
+                last_error = e
+                if attempt == max_retries:
+                    # IMPORTANT: re-raise instead of swallowing. Previously this
+                    # function printed and returned normally on final failure,
+                    # so callers had no way to know the Sheets write never
+                    # happened -- tickets were marked successful and skipped
+                    # the dead-letter queue even though they never landed in
+                    # the sheet. Callers must now catch this and route to the
+                    # DLQ on failure.
+                    print(f"[sheets_sync] Failed to upsert {ticket_id} after {max_retries} attempts: {e}")
+                    raise
+                # Exponential backoff: quota windows are ~60-100s, so a fixed
+                # 1.5s/3s backoff (the old behavior) almost never recovered in
+                # time. Back off more aggressively, especially for rate-limit
+                # errors.
+                delay = min(2 ** attempt, 30)
+                time.sleep(delay)
+
+
+def _looks_like_auth_error(exc) -> bool:
+    msg = str(exc).lower()
+    return "401" in msg or "403" in msg or "unauthorized" in msg or "permission" in msg
