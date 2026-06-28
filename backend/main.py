@@ -23,20 +23,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 # =========================
 # [APP]
 # =========================
+app = FastAPI()
 
-app = FastAPI(
-    title="Agentico",
-    description="Autonomous ticket-resolution agent with multi-channel intake and audit-grade logging.",
-    version="1.0.0"
-)
+origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "https://agentico-tau.vercel.app",
+    "https://agentico-mzygajmfk-pranikas-projects-37886178.vercel.app",
+    "https://agentico-git-main-pranikas-projects-37886178.vercel.app",
+]
 
-# CORS — allow frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=origins,
+    allow_credentials=False,
+    allow_methods=["https://agentico-tau.vercel.app/"],
+    allow_headers=["https://agentico-tau.vercel.app/"],
 )
 
 # =========================
