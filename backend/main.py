@@ -36,9 +36,9 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=False,
-    allow_methods=["https://agentico-tau.vercel.app/"],
-    allow_headers=["https://agentico-tau.vercel.app/"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # =========================
