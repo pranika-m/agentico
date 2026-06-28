@@ -1,13 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { apiPost } from "@/lib/api";
+
+interface WhatsAppMessage {
+  time: string;
+  message: string;
+}
 
 interface ContactSummary {
   message_count: number;
   last_contact: string;
   last_message: string;
+  messages: WhatsAppMessage[];
+}
+
+interface SubmitResponse {
+  status: string;
+  ticket_id: string;
 }
 
 function classify(message: string) {
@@ -22,11 +33,18 @@ export default function WhatsAppIngest() {
   const [fileName, setFileName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [emailDrafts, setEmailDrafts] = useState<Record<string, string>>({});
+  const [queueState, setQueueState] = useState<Record<string, "idle" | "adding" | "added" | "error">>({});
+  const [queuedTicketIds, setQueuedTicketIds] = useState<Record<string, string>>({});
 
   const handleFile = async (file: File) => {
     setLoading(true);
     setError("");
     setFileName(file.name);
+    setExpanded(null);
+    setQueueState({});
+    setQueuedTicketIds({});
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -40,6 +58,31 @@ export default function WhatsAppIngest() {
 
   const rows = useMemo(() => Object.entries(results ?? {}).sort(([, a], [, b]) => b.message_count - a.message_count), [results]);
   const actionable = rows.filter(([, info]) => classify(info.last_message) === "Create ticket").length;
+
+  const addToQueue = async (name: string, info: ContactSummary) => {
+    const email = (emailDrafts[name] || "").trim();
+    if (!email) {
+      setQueueState((prev) => ({ ...prev, [name]: "error" }));
+      return;
+    }
+
+    setQueueState((prev) => ({ ...prev, [name]: "adding" }));
+    try {
+      // Use this contact's own messages as the ticket body, so the agent
+      // gets the full conversation context, not just the last line.
+      const conversation = info.messages.map((m) => `[${m.time}] ${m.message}`).join("\n");
+      const response = await apiPost<SubmitResponse>("/tickets/submit", {
+        name,
+        email,
+        query: conversation,
+        subject: `WhatsApp: ${name}`,
+      });
+      setQueueState((prev) => ({ ...prev, [name]: "added" }));
+      setQueuedTicketIds((prev) => ({ ...prev, [name]: response.ticket_id }));
+    } catch {
+      setQueueState((prev) => ({ ...prev, [name]: "error" }));
+    }
+  };
 
   return (
     <>
@@ -98,18 +141,88 @@ export default function WhatsAppIngest() {
                     <th>Last contact</th>
                     <th>Recommended action</th>
                     <th>Last message</th>
+                    <th>Detail</th>
+                    <th>Add to queue</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map(([name, info]) => (
-                    <tr key={name}>
-                      <td className="table-primary">{name}</td>
-                      <td>{info.message_count}</td>
-                      <td>{info.last_contact}</td>
-                      <td><span className="priority priority-medium">{classify(info.last_message)}</span></td>
-                      <td>{info.last_message}</td>
-                    </tr>
-                  ))}
+                  {rows.map(([name, info]) => {
+                    const isOpen = expanded === name;
+                    const state = queueState[name] ?? "idle";
+                    return (
+                      <Fragment key={name}>
+                        <tr>
+                          <td className="table-primary">{name}</td>
+                          <td>{info.message_count}</td>
+                          <td>{info.last_contact}</td>
+                          <td><span className="priority priority-medium">{classify(info.last_message)}</span></td>
+                          <td>{info.last_message}</td>
+                          <td>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => setExpanded(isOpen ? null : name)}
+                            >
+                              {isOpen ? "Hide" : "View conversation"}
+                            </button>
+                          </td>
+                          <td>
+                            {state === "added" ? (
+                              <span className="priority priority-low">✓ {queuedTicketIds[name]}</span>
+                            ) : (
+                              <div className="stack-8" style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                                <input
+                                  className="form-input form-input-sm"
+                                  type="email"
+                                  placeholder="customer email"
+                                  value={emailDrafts[name] || ""}
+                                  onChange={(event) =>
+                                    setEmailDrafts((prev) => ({ ...prev, [name]: event.target.value }))
+                                  }
+                                  style={{ width: "150px" }}
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm"
+                                  disabled={state === "adding"}
+                                  onClick={() => addToQueue(name, info)}
+                                >
+                                  {state === "adding" ? "Adding..." : "Add to queue"}
+                                </button>
+                              </div>
+                            )}
+                            {state === "error" && (
+                              <p className="text-muted" style={{ color: "#c0392b", marginTop: "4px" }}>
+                                Enter an email first.
+                              </p>
+                            )}
+                          </td>
+                        </tr>
+                        {isOpen && (
+                          <tr>
+                            <td colSpan={7} style={{ background: "rgba(0,0,0,0.02)" }}>
+                              <table className="data-table">
+                                <thead>
+                                  <tr>
+                                    <th>Time</th>
+                                    <th>Message</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {info.messages.map((m, idx) => (
+                                    <tr key={idx}>
+                                      <td style={{ whiteSpace: "nowrap" }}>{m.time}</td>
+                                      <td>{m.message}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -119,3 +232,4 @@ export default function WhatsAppIngest() {
     </>
   );
 }
+
