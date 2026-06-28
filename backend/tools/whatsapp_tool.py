@@ -17,6 +17,7 @@ def parse_whatsapp_export(text: str) -> dict:
         summary[sender] = {
             "message_count": len(messages),
             "last_contact": messages[-1]["time"],
-            "last_message": messages[-1]["message"]
+            "last_message": messages[-1]["message"],
+            "messages": messages,  # full conversation history for this contact
         }
     return summary
