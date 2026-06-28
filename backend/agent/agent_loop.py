@@ -237,19 +237,28 @@ async def finalize_ticket_and_flush_logs(
     state_mgr.transition(ticket_id, TicketState.ESCALATED if decision == "ESCALATED" else TicketState.RESOLVED)
     logger.set_decision(ticket_id, decision, escalation_summary=escalation_summary, reply=reply)
     query = ticket.get("query") or ticket.get("body") or ticket.get("subject", "")
-    await asyncio.to_thread(
-        log_ticket_to_sheet,
-        ticket_id,
-        customer_email,
-        decision,
-        confidence,
-        query=query,
-        reply=reply or escalation_summary or "",
-    )
+    try:
+        await asyncio.to_thread(
+            log_ticket_to_sheet,
+            ticket_id,
+            customer_email,
+            decision,
+            confidence,
+            query=query,
+            reply=reply or escalation_summary or "",
+        )
+    except Exception as exc:
+        # log_ticket_to_sheet now re-raises after exhausting its retries
+        # instead of swallowing the failure. Surface it clearly here, then
+        # re-raise so the caller's except block routes this ticket to the
+        # dead-letter queue instead of silently marking it done while it
+        # never actually landed in the sheet.
+        logger.log_error(ticket_id, "SHEETS_SYNC_FAILED", str(exc))
+        logger.flush_to_disk()
+        raise
     logger.flush_to_disk()
 
 async def run_batch_ticket_processing(tickets: list[dict]) -> None:
     tasks = [process_single_ticket_lifecycle(ticket) for ticket in tickets]
     await asyncio.gather(*tasks, return_exceptions=True)
     get_audit_logger().flush_to_disk()
-
